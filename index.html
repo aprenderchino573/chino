@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="学中文">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-180.png">
-<title>Chino · 3 palabras al día</title>
+<title>Chino · 3 palabras cada 12 h</title>
 <style>
 :root{
   --bg:#f6f1e7; --card:#fffdf8; --ink:#1f1b16; --muted:#7a7166; --line:#e6dccb;
@@ -230,8 +230,17 @@ function speak(...texts) {
 /* ---------- planificación (repaso espaciado) ---------- */
 const learnedIds = () => Object.keys(state.learned).map(Number);
 const isKnown = id => state.learned[id] !== undefined;
-const dueList = () => shuffle(learnedIds().filter(id => state.learned[id].due <= today()));
-const lessonAvailable = () => state.lastLessonDay !== today() && state.nextBatch < NBATCH;
+const H12 = 12 * 3600 * 1000;
+// una palabra está pendiente si le toca hoy o, en su primer paso, si han pasado 12 h
+const isDue = L => L.dueAt ? Date.now() >= L.dueAt : L.due <= today();
+const dueList = () => shuffle(learnedIds().filter(id => isDue(state.learned[id])));
+// migración: progreso de la versión diaria (lección hecha hoy → cuenta desde medianoche)
+if (state.lastLessonAt === undefined) {
+  if (state.lastLessonDay === today()) { const d = new Date(); d.setHours(0, 0, 0, 0); state.lastLessonAt = d.getTime(); }
+  else state.lastLessonAt = 0;
+}
+const nextLessonAt = () => (state.lastLessonAt || 0) + H12;
+const lessonAvailable = () => Date.now() >= nextLessonAt() && state.nextBatch < NBATCH;
 function plannedNew() {
   // palabras de lotes ya empezados que quedaron sin ver + lotes de hoy
   const out = [];
@@ -244,13 +253,15 @@ function plannedNew() {
 }
 function learnWord(w) {
   if (isKnown(w)) return;
-  state.learned[w] = { int: 1, ease: 2.5, due: today() + 1, reps: 0, lapses: 0, first: today() };
+  state.learned[w] = { int: 0.5, ease: 2.5, due: today() + 1, dueAt: Date.now() + H12, reps: 0, lapses: 0, first: today() };
 }
 function grade(w, ok) {
   const L = state.learned[w]; if (!L) return;
+  delete L.dueAt;
   if (ok) {
     L.reps++;
-    L.int = L.int <= 1 ? 3 : Math.round(L.int * L.ease);
+    // 12 h → 1 día → 3 días → ×facilidad
+    L.int = L.int < 1 ? 1 : L.int <= 1 ? 3 : Math.round(L.int * L.ease);
     L.due = today() + L.int;
   } else {
     L.lapses++; L.ease = Math.max(1.3, +(L.ease - 0.2).toFixed(2));
@@ -318,6 +329,7 @@ function markLesson() {
   const n = state.nextBatch === 0 ? 1 : state.perDay;
   state.nextBatch = Math.min(NBATCH, state.nextBatch + n);
   state.lastLessonDay = today();
+  state.lastLessonAt = Date.now();
   state.lessons = (state.lessons || 0) + 1;
   sess.lessonMarked = true;
 }
@@ -383,14 +395,14 @@ function renderHome() {
     `<div class="warn">Este navegador no permite reproducir audio de voz.</div>`;
   let title, sub;
   if (nw && due) { title = `${due} repaso${due > 1 ? "s" : ""} y ${nw} palabras nuevas`; sub = "Primero repasas, luego aprendes las nuevas."; }
-  else if (nw) { title = `${nw} palabras nuevas hoy`; sub = state.nextBatch === 0 ? "Primer día: 10 palabras básicas para empezar a formar frases." : "Cada una dentro de una frase útil."; }
-  else if (due) { title = `${due} repaso${due > 1 ? "s" : ""} pendiente${due > 1 ? "s" : ""}`; sub = state.nextBatch >= NBATCH ? "Has completado el temario." : "Las palabras nuevas de hoy ya están aprendidas."; }
-  else { title = "Todo hecho por hoy"; sub = state.nextBatch >= NBATCH ? "Has completado todo el temario." : "Mañana tendrás palabras nuevas."; }
+  else if (nw) { title = `${nw} palabras nuevas`; sub = state.nextBatch === 0 ? "Primer día: 10 palabras básicas para empezar a formar frases." : "Cada una dentro de una frase útil."; }
+  else if (due) { title = `${due} repaso${due > 1 ? "s" : ""} pendiente${due > 1 ? "s" : ""}`; sub = state.nextBatch >= NBATCH ? "Has completado el temario." : `Próximas palabras nuevas en ${horas(nextLessonAt() - Date.now())}.`; }
+  else { title = "Todo hecho por ahora"; sub = state.nextBatch >= NBATCH ? "Has completado todo el temario." : `Próximas palabras nuevas en ${horas(nextLessonAt() - Date.now())}.`; }
   const main = (nw || due)
     ? `<button class="big" id="go">Empezar</button>`
     : (known ? `<button class="big ghost" id="free">Práctica libre (sin afectar al calendario)</button>` : "");
   $app.innerHTML = `
-    <div class="top"><div class="brand">学中文<small>3 palabras al día</small></div>
+    <div class="top"><div class="brand">学中文<small>3 palabras cada 12 h</small></div>
       <button class="iconbtn" id="set" aria-label="Ajustes">${ICON.gear}</button></div>
     ${voiceWarn}
     <div class="stats">
@@ -481,15 +493,20 @@ function renderDone() {
     <div class="stats">
       <div class="stat"><b>${learnedIds().length}</b><span>palabras</span></div>
       <div class="stat"><b>${state.streak || 0}</b><span>días seguidos</span></div>
-      <div class="stat"><b>${dueTomorrow()}</b><span>repasos mañana</span></div>
+      <div class="stat"><b>${dueTomorrow()}</b><span>repasos en 24 h</span></div>
     </div>
     <button class="big" id="home">Volver</button>`;
   sess = null;
   document.getElementById("home").onclick = () => { view = "home"; render(); };
 }
-const dueTomorrow = () => learnedIds().filter(id => state.learned[id].due <= today() + 1).length;
+const dueTomorrow = () => learnedIds().filter(id => { const L = state.learned[id]; return L.dueAt ? L.dueAt <= Date.now() + 2 * H12 : L.due <= today() + 1; }).length;
 
-function whenLabel(due) {
+function horas(ms) {
+  const m = Math.max(1, Math.ceil(ms / 60000));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? " " + (m % 60) + " min" : ""}`;
+}
+function whenLabel(due, dueAt) {
+  if (dueAt) return dueAt <= Date.now() ? "ahora" : `en ${horas(dueAt - Date.now())}`;
   const d = due - today();
   if (d <= 0) return "hoy"; if (d === 1) return "mañana"; if (d < 30) return `en ${d} días`;
   return `en ${Math.round(d / 30)} mes${Math.round(d / 30) > 1 ? "es" : ""}`;
@@ -500,7 +517,7 @@ function renderVocab() {
     <div class="top"><button class="iconbtn" id="b">${ICON.back}</button><h1 class="title">Vocabulario · ${ids.length}</h1><div style="width:40px"></div></div>
     <div class="list">${ids.length ? ids.map(id => `<button class="row" data-w="${id}">
       <div class="h">${esc(W[id][0])}</div><div class="t"><div>${esc(W[id][1])}</div><div>${esc(W[id][2])}</div></div>
-      <div class="d">${whenLabel(state.learned[id].due)}</div></button>`).join("")
+      <div class="d">${whenLabel(state.learned[id].due, state.learned[id].dueAt)}</div></button>`).join("")
       : `<p class="note">Aún no has aprendido palabras.</p>`}</div>`;
   document.getElementById("b").onclick = () => { view = "home"; render(); };
   $app.querySelectorAll(".row").forEach(r => r.onclick = () => { const id = +r.dataset.w; speak(W[id][0]); openSheet(id); });
@@ -513,7 +530,7 @@ function renderSettings() {
   $app.innerHTML = `
     <div class="top"><button class="iconbtn" id="b">${ICON.back}</button><h1 class="title">Ajustes</h1><div style="width:40px"></div></div>
     <div class="set">
-      <div class="opt"><label>Palabras nuevas al día</label><div class="seg" id="seg">${seg}</div>
+      <div class="opt"><label>Palabras nuevas cada 12 h</label><div class="seg" id="seg">${seg}</div>
         <small>Se aplica desde la próxima lección. Las frases están pensadas en grupos de 3.</small></div>
       <div class="opt"><label>Velocidad de la voz · ${state.rate.toFixed(2)}×</label>
         <input type="range" id="rate" min="0.5" max="1.2" step="0.05" value="${state.rate}">
@@ -579,6 +596,7 @@ try {
 } catch (e) {}
 // la lista de voces llega tarde en algunos navegadores
 setTimeout(() => { if (view === "home") render(); }, 1200);
+setInterval(() => { if (view === "home" && !sheet) render(); }, 60000);
 </script>
 </body>
 </html>
