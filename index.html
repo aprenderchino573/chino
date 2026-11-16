@@ -108,6 +108,18 @@ h1.title{font-size:20px;margin:0}
 input[type=range]{width:100%;accent-color:var(--accent)}
 .danger{color:var(--accent);font-weight:600;padding:12px;border-radius:12px;border:1px solid var(--line);width:100%}
 .done{text-align:center;padding:30px 0}
+.es{font-size:20px;text-align:center;margin:4px 0 8px;line-height:1.35}
+.win{width:100%;font-family:var(--hz);font-size:24px;padding:12px 14px;margin-top:12px;border-radius:14px;border:1px solid var(--line);background:var(--bg);color:var(--ink);outline:none}
+.win:focus{border-color:var(--accent)}
+.warnp{color:var(--accent);font-size:13px;text-align:center;margin-top:6px;min-height:1em}
+.wres{text-align:center;font-weight:700;margin:10px 0 4px;font-size:15px}
+.wres.okb{color:var(--ok)} .wres.kob{color:var(--accent)}
+.cmp{background:var(--bg);border-radius:12px;padding:8px 12px;margin:6px 0}
+.cmp small{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+.cmp .zh{font-family:var(--hz);font-size:22px;letter-spacing:.04em}
+.cmp .bad{color:var(--accent);text-decoration:line-through}
+.cmp .miss{color:var(--ok);border-bottom:2px solid var(--ok)}
+.muted{color:var(--muted);font-size:14px}
 textarea{width:100%;min-height:90px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:12px/1.4 ui-monospace,Menlo,monospace;padding:10px;margin-top:8px}
 .row2{display:flex;gap:8px;margin-top:8px}
 .row2 button{flex:1;padding:11px;border-radius:12px;border:1px solid var(--line);font-weight:600}
@@ -159,7 +171,7 @@ const sentText = ids => ids.map(x => typeof x === "number" ? W[x][0] : x).join("
 /* ---------- estado ---------- */
 const LS_KEY = "zh3-estado-v1";
 const defaults = () => ({ v: 1, learned: {}, nextBatch: 0, lastLessonDay: -1, perDay: 1, rate: 0.8,
-  autoplay: true, pinyinFirst: false, lastSent: {}, seenS: {}, streak: 0, lastActive: -1, lessons: 0, updatedAt: 0 });
+  autoplay: true, pinyinFirst: false, writeRate: 0.4, lastSent: {}, seenS: {}, streak: 0, lastActive: -1, lessons: 0, updatedAt: 0 });
 let state = defaults();
 function readLocal() { try { const s = JSON.parse(localStorage.getItem(LS_KEY)); return s && s.v ? s : null; } catch (e) { return null; } }
 function writeLocal() { try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {} }
@@ -298,9 +310,9 @@ function startSession(freeOnly) {
   const queue = [];
   let newWords = [];
   if (freeOnly) {
-    shuffle(learnedIds()).slice(0, 20).forEach(w => queue.push({type: "free", w}));
+    shuffle(learnedIds()).slice(0, 20).forEach(w => queue.push({type: canWrite(w) ? "write" : "free", w}));
   } else {
-    dueList().forEach(w => queue.push({type: "review", w}));
+    dueList().forEach(w => queue.push({type: canWrite(w) ? "write" : "review", w, sched: true}));
     newWords = plannedNew();
     newWords.forEach(w => queue.push({type: "new", w}));
     shuffle(newWords.slice()).forEach(w => queue.push({type: "check", w}));
@@ -311,9 +323,30 @@ function startSession(freeOnly) {
   prepareCard();
   render();
 }
+// una palabra puede salir para escribir si ya la has acertado leyendo al menos una vez
+function canWrite(w) {
+  const L = state.learned[w];
+  return !!L && (L.reads || L.reps || 0) >= 1 && Math.random() < (state.writeRate ?? 0.4);
+}
+// normaliza para comparar: sin puntuación ni espacios
+const normZh = s => s.replace(/[\s，。？！、：；,.?!:;'"“”‘’（）()…—-]/g, "");
+// diferencia carácter a carácter (subsecuencia común más larga)
+function diffZh(a, b) {
+  const n = a.length, m = b.length, L = Array.from({length: n + 1}, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const ina = new Array(n).fill(false), inb = new Array(m).fill(false);
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ina[i] = inb[j] = true; i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) i++; else j++;
+  }
+  return {ina, inb};
+}
 function prepareCard() {
   const c = sess.queue[sess.i]; if (!c) return;
   sess.revealed = c.type === "new";
+  sess.typed = null;
   if (c.type === "new") {
     sess.sent = mainSent[c.w];
     markSeen(sess.sent);
@@ -348,7 +381,8 @@ function next() {
 function answer(ok) {
   const c = sess.queue[sess.i];
   state.lastSent[c.w] = sess.sent;
-  if (c.type === "review") { grade(c.w, ok); sess.stats.review++; }
+  if (c.sched) { grade(c.w, ok); sess.stats.review++; }
+  if (ok && (c.type === "review" || c.type === "relearn" || c.type === "free") && state.learned[c.w]) state.learned[c.w].reads = (state.learned[c.w].reads || 0) + 1;
   if (!ok) {
     sess.stats.fail++;
     const pos = Math.min(sess.queue.length, sess.i + 3 + Math.floor(Math.random() * 4));
@@ -423,9 +457,38 @@ function renderHome() {
 function renderSession() {
   const c = sess.queue[sess.i], w = W[c.w], si = sess.sent;
   const pct = Math.round(sess.i / sess.total * 100);
-  const labels = {new: "Palabra nueva", check: "Comprueba la nueva", review: "Repaso", relearn: "Otra vez", free: "Práctica libre"};
+  const labels = {new: "Palabra nueva", check: "Comprueba la nueva", review: "Repaso", relearn: "Otra vez", free: "Práctica libre", write: "Escribe en chino"};
   let body;
-  if (c.type === "new") {
+  if (c.type === "write") {
+    const target = normZh(sentText(S[si][0]));
+    let res = "";
+    if (sess.revealed) {
+      const typed = normZh(sess.typed || "");
+      const exact = typed === target;
+      const {ina, inb} = diffZh(typed, target);
+      const yours = typed ? [...typed].map((ch, k) => `<span class="${ina[k] ? "" : "bad"}">${esc(ch)}</span>`).join("") : '<span class="muted">(sin respuesta)</span>';
+      const right = [...target].map((ch, k) => `<span class="${inb[k] ? "" : "miss"}">${esc(ch)}</span>`).join("");
+      res = `<div class="wres ${exact ? "okb" : "kob"}">${exact ? "¡Correcto!" : sess.typed === "" ? "Solución" : "Compara"}</div>
+        ${exact ? "" : `<div class="cmp"><small>Tu respuesta</small><div class="zh">${yours}</div><small>Correcta</small><div class="zh">${right}</div></div>`}
+        ${sentenceHTML(si, c.w, false)}
+        <div class="gloss"><b>${esc(w[0])}</b> ${esc(w[1])} · ${esc(w[2])}</div>`;
+      body = `<div class="kind">${labels.write}</div>
+        <div class="card"><div class="es">${esc(S[si][1])}</div>${res}
+          <div class="center"><button class="play" id="play">${ICON.sound} Escuchar</button></div></div>
+        <div class="spacer"></div>
+        ${exact ? `<button class="big" id="ok">Siguiente</button>`
+          : sess.typed ? `<div class="grade"><button class="again" id="no">Otra vez</button><button class="good" id="ok">También vale</button></div>`
+          : `<button class="big" id="no">Siguiente</button>`}`;
+    } else {
+      body = `<div class="kind">${labels.write}</div>
+        <div class="card"><div class="es">${esc(S[si][1])}</div>
+          <div class="gloss">Repasas: ${esc(w[2])}</div>
+          <form id="wf" autocomplete="off"><input id="win" class="win" type="text" lang="zh-CN" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Escribe la frase en chino"></form>
+          <div class="warnp" id="wp"></div></div>
+        <div class="spacer"></div>
+        <div class="grade"><button class="again" id="giveup">No lo sé</button><button class="good" id="chk">Comprobar</button></div>`;
+    }
+  } else if (c.type === "new") {
     body = `<div class="kind new">${labels.new}</div>
       <div class="word"><div class="h">${esc(w[0])}</div><div class="p">${esc(w[1])}</div><div class="m">${esc(w[2])}</div></div>
       ${sentenceHTML(si, c.w, false)}
@@ -454,9 +517,23 @@ function renderSession() {
     ${body}`;
   bindTokens();
   document.getElementById("x").onclick = () => { try { window.speechSynthesis && speechSynthesis.cancel(); } catch (e) {} view = "home"; sess = null; render(); };
-  document.getElementById("play").onclick = () => speak(sentText(S[si][0]));
   const on = (id, f) => { const e = document.getElementById(id); if (e) e.onclick = f; };
+  on("play", () => speak(sentText(S[si][0])));
   on("next", next);
+  const wf = document.getElementById("wf");
+  if (wf) {
+    const inp = document.getElementById("win");
+    const check = () => {
+      const v = inp.value.trim();
+      if (!v) { inp.focus(); return; }
+      if (/[a-zA-Z]{2,}/.test(v) && !/[\u4e00-\u9fff]/.test(v)) { document.getElementById("wp").textContent = "Parece pinyin sin convertir: elige los caracteres en el teclado."; return; }
+      sess.typed = v; sess.revealed = true; render(); autoplayCard();
+    };
+    wf.onsubmit = e => { e.preventDefault(); check(); };
+    on("chk", check);
+    on("giveup", () => { sess.typed = ""; sess.revealed = true; render(); autoplayCard(); });
+    setTimeout(() => { try { inp.focus(); } catch (e) {} }, 50);
+  }
   on("rev", () => { sess.revealed = true; render(); autoplayCard(); });
   on("ok", () => answer(true));
   on("no", () => answer(false));
@@ -536,6 +613,8 @@ function renderSettings() {
         <input type="range" id="rate" min="0.5" max="1.2" step="0.05" value="${state.rate}">
         <small>${voice}</small>
         <div class="center"><button class="play" id="test">${ICON.sound} Probar: 你好，我是西班牙人。</button></div></div>
+      <div class="opt"><label>Preguntas de escribir en chino</label><div class="seg" id="wseg">${[[0, "Ninguna"], [0.2, "Pocas"], [0.4, "Algunas"], [0.65, "Muchas"]].map(([v, l]) => `<button data-v="${v}" class="${(state.writeRate ?? 0.4) === v ? "on" : ""}">${l}</button>`).join("")}</div>
+        <small>En el repaso, una parte de las frases te las pide en castellano para que las escribas. Solo con palabras que ya has acertado leyendo.</small></div>
       <div class="opt"><div class="switch">Reproducir audio automáticamente<button class="tg-sw ${state.autoplay ? "on" : ""}" id="ap"></button></div></div>
       <div class="opt"><div class="switch">Pinyin visible antes de destapar<button class="tg-sw ${state.pinyinFirst ? "on" : ""}" id="pf"></button></div>
         <small>Desactivado obliga a leer los caracteres; el pinyin aparece al destapar la traducción.</small></div>
@@ -548,6 +627,7 @@ function renderSettings() {
     </div>`;
   document.getElementById("b").onclick = () => { view = "home"; render(); };
   document.querySelectorAll("#seg button").forEach(b => b.onclick = () => { state.perDay = +b.dataset.n; save(); render(); });
+  document.querySelectorAll("#wseg button").forEach(b => b.onclick = () => { state.writeRate = +b.dataset.v; save(); render(); });
   const r = document.getElementById("rate");
   r.oninput = () => { state.rate = +r.value; r.previousElementSibling.textContent = `Velocidad de la voz · ${state.rate.toFixed(2)}×`; };
   r.onchange = () => save();
@@ -581,7 +661,7 @@ function renderSettings() {
   };
   document.getElementById("reset").onclick = () => {
     if (!confirmReset) { confirmReset = true; render(); return; }
-    const keep = {perDay: state.perDay, rate: state.rate, autoplay: state.autoplay, pinyinFirst: state.pinyinFirst};
+    const keep = {perDay: state.perDay, writeRate: state.writeRate, rate: state.rate, autoplay: state.autoplay, pinyinFirst: state.pinyinFirst};
     state = Object.assign(defaults(), keep); confirmReset = false; save(); view = "home"; render();
   };
 }
