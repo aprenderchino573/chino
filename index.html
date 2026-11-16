@@ -131,6 +131,16 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .optb:active{background:var(--line)}
 .lis{text-align:center;padding:28px 20px}
 .lis .win{font-size:18px}
+.lis{padding:16px 20px}.lis .bigplay{width:76px;height:76px;margin:4px 0 6px}.lis .bigplay svg{width:32px;height:32px}
+.q{text-align:center;color:var(--muted);font-size:14px;margin:14px 0 8px}
+.mcs{display:flex;flex-direction:column;gap:8px}
+.mc{width:100%;text-align:left;padding:13px 16px;border-radius:14px;background:var(--card);border:1px solid var(--line);font-size:16px;line-height:1.3}
+.mc:active{background:var(--line)}
+.mcs.py{display:grid;grid-template-columns:1fr 1fr}.mcs.py .mc{text-align:center;font-size:20px;color:var(--accent)}
+.skip{display:block;margin:10px auto 0;padding:10px 18px;color:var(--muted);font-size:14px;text-decoration:underline}
+.flag{color:var(--muted);font-size:12px;margin-top:10px;text-decoration:underline}.flag:disabled{text-decoration:none}
+.word.nb0{border-bottom:0;margin-bottom:0;padding-bottom:4px}.sent.ctr{justify-content:center}
+.wbtn{display:block;width:100%;text-align:left}
 .bigplay{width:96px;height:96px;border-radius:50%;background:var(--accent);color:#fff;display:inline-grid;place-items:center;margin:18px 0 6px}
 .bigplay svg{width:40px;height:40px}
 .sent.sm{font-size:21px;line-height:1.8;justify-content:flex-start}.sent.sm rt{font-size:11px}
@@ -301,6 +311,7 @@ function migrate() {
     }
   }
   if (state.seenS && !state.seq) { const ks = Object.keys(state.seenS).sort((x, y) => state.seenS[x] - state.seenS[y]); ks.forEach((k, n) => { state.seenS[k] = n + 1; }); state.seq = ks.length; }
+  if (!state.firstUse) state.firstUse = Date.now();
   if (!state.readDone) state.readDone = {};
   for (const k of Object.keys(state.readDone)) if (/^\d+$/.test(k)) { const tt = (DATA.rdOld || [])[+k]; if (tt) state.readDone[tt] = state.readDone[k]; delete state.readDone[k]; }
   state.v = 2;
@@ -355,7 +366,8 @@ function grade(w, ok, now) {
 /* ---------- elección de frase y de tipo de tarjeta ---------- */
 const partners = {};
 (DATA.pairs || []).forEach(([a, b]) => { (partners[a] = partners[a] || []).push(b); (partners[b] = partners[b] || []).push(a); });
-const knownSents = w => sentByWord[w].filter(si => S[si][0].every(x => typeof x !== "number" || isKnown(x)));
+const okSent = si => !(state.flag && state.flag[si]) && S[si][0].every(x => typeof x !== "number" || isKnown(x));
+const knownSents = w => sentByWord[w].filter(okSent);
 const wordsOf = si => [...new Set(S[si][0].filter(x => typeof x === "number"))];
 // Entre las frases que ya puedes entender, prefiere la que repasa más palabras pendientes a la vez
 // y, a igualdad, una de las que llevas más tiempo sin ver. No repite frase en la sesión.
@@ -386,6 +398,44 @@ function markSeen(si) {
   state.seq = (state.seq || 0) + 1; state.seenS[si] = state.seq;
   if (sess) sess.used.add(si);
 }
+/* ---------- preguntas de opción múltiple: la app corrige, no tú ---------- */
+const baseEs = s => s.replace(/\s*\(.*?\)/g, "").trim();
+// traducciones de frases parecidas (comparten palabras con la mostrada), para que haya que entenderla entera
+function sentOptions(si) {
+  const ws = wordsOf(si), correct = baseEs(S[si][1]), zh = sentText(S[si][0]);
+  const cand = new Map();
+  ws.forEach(x => sentByWord[x].forEach(sj => { if (sj !== si) cand.set(sj, (cand.get(sj) || 0) + 1); }));
+  const arr = [...cand.keys()].filter(okSent).map(sj => [sj, cand.get(sj) / (ws.length + wordsOf(sj).length - cand.get(sj)) + Math.random() * 0.08]).sort((a, b) => b[1] - a[1]);
+  const seenT = new Set([correct.toLowerCase()]), top = [];
+  const tryAdd = sj => { const b = baseEs(S[sj][1]); if (seenT.has(b.toLowerCase()) || sentText(S[sj][0]) === zh) return; seenT.add(b.toLowerCase()); top.push(b); };
+  for (const [sj] of arr) { tryAdd(sj); if (top.length >= 6) break; }
+  let pick = shuffle(top).slice(0, 3);
+  if (pick.length < 3) { top.length = 0; for (const sj of shuffle(S.map((s, i) => i))) { if (pick.length + top.length >= 3) break; if (sj !== si) tryAdd(sj); } pick = pick.concat(top).slice(0, 3); }
+  return shuffle([{t: correct, ok: true}, ...pick.map(t => ({t, ok: false}))]);
+}
+function glossOptions(w) {
+  const seen = new Set([W[w][2]]), out = [];
+  const near = shuffle(W.map((x, i) => i).filter(x => Math.abs(W[x][3] - W[w][3]) <= 4 && (isKnown(x) || W[x][3] <= W[w][3])));
+  for (const x of [...(partners[w] || []), ...near, ...shuffle(learnedIds())]) {
+    if (x === w || seen.has(W[x][2])) continue;
+    seen.add(W[x][2]); out.push(W[x][2]); if (out.length >= 3) break;
+  }
+  return shuffle([{t: W[w][2], ok: true}, ...out.map(t => ({t, ok: false}))]);
+}
+const TONES = ["\u0304", "\u0301", "\u030C", "\u0300"];
+const hasTone = w => [...W[w][1].normalize("NFD")].some(ch => TONES.includes(ch));
+// mismo pinyin con los tonos cambiados
+function toneOptions(w) {
+  const base = W[w][1].normalize("NFD"), pos = [];
+  for (let i = 0; i < base.length; i++) if (TONES.includes(base[i])) pos.push(i);
+  const set = new Set([base]); let guard = 0;
+  while (set.size < 4 && guard++ < 300) {
+    const a = base.split(""), n = pos.length === 1 ? 1 : (Math.random() < 0.6 ? 1 : 2);
+    shuffle(pos.slice()).slice(0, n).forEach(i => { let tn; do { tn = TONES[Math.floor(Math.random() * 4)]; } while (tn === base[i]); a[i] = tn; });
+    set.add(a.join(""));
+  }
+  return shuffle([...set].map(s => ({t: s.normalize("NFC"), ok: s === base})));
+}
 const voiceOK = () => "speechSynthesis" in window;
 function hardMode(w, k) {
   const L = state.learned[w];
@@ -404,6 +454,7 @@ function pickMode(w) {
   const wr = state.writeRate === undefined ? 0.4 : state.writeRate;
   const canWrite = wr > 0 && (hears >= 1 || !canListen);
   if ((partners[w] || []).some(isKnown) && Math.random() < 0.2) return "choose";
+  if (state.tones !== false && hasTone(w) && Math.random() < 0.12) return "tone";
   if (canWrite && Math.random() < wr) return "write";
   if (canListen && Math.random() < (hears >= 1 ? 0.4 : 0.75)) return "listen";
   return "read";
@@ -456,7 +507,7 @@ function diffZh(a, b) {
 }
 function prepareCard() {
   const c = sess.queue[sess.i]; if (!c) return;
-  sess.typed = null; sess.pick = null; sess.co = []; sess.coEx = new Set();
+  sess.typed = null; sess.pick = null; sess.opts = null; sess.dict = false; sess.dictOk = false; sess.co = []; sess.coEx = new Set();
   if (c.type === "leech") { sess.sent = mainSent[c.w]; sess.revealed = true; return; }
   if (c.type === "new") {
     sess.sent = mainSent[c.w]; markSeen(sess.sent);
@@ -468,7 +519,8 @@ function prepareCard() {
     return;
   }
   if (sess.pending) sess.pending.delete(c.w);
-  if (!c.mode) c.mode = (c.type === "review" || c.type === "free") ? pickMode(c.w) : "read";
+  if (!c.mode || (c.mode === "read" && c.type !== "review" && c.type !== "free")) c.mode = (c.type === "review" || c.type === "free") ? pickMode(c.w) : "mean";
+  if (c.mode === "tone") { sess.sent = mainSent[c.w]; sess.opts = toneOptions(c.w); sess.revealed = false; return; }
   if (c.mode === "choose") {
     let si = -1;
     for (const a of shuffle((partners[c.w] || []).filter(isKnown))) { si = pickSentence(c.w, {alt: a}); if (si >= 0) { c.alt = a; break; } }
@@ -476,7 +528,9 @@ function prepareCard() {
   }
   if (c.mode !== "choose") sess.sent = pickSentence(c.w, {avoidMain: c.type === "check", mode: c.mode, co: !!c.sched});
   markSeen(sess.sent);
-  if (c.sched && c.mode !== "choose" && sess.pending) sess.co = wordsOf(sess.sent).filter(x => x !== c.w && sess.pending.has(x));
+  if (c.sched && c.mode !== "choose" && c.mode !== "mean" && sess.pending) sess.co = wordsOf(sess.sent).filter(x => x !== c.w && sess.pending.has(x));
+  if (c.mode === "read" || c.mode === "listen") sess.opts = sentOptions(sess.sent);
+  if (c.mode === "mean") sess.opts = glossOptions(c.w);
   sess.revealed = false;
 }
 function markLesson() {
@@ -493,6 +547,7 @@ function autoplayCard() {
   const c = sess.queue[sess.i]; if (!c || c.type === "leech") return;
   const txt = sentText(S[sess.sent][0]);
   if (c.mode === "listen" && !sess.revealed) return speak(txt);
+  if (c.mode === "tone") { if (sess.revealed) speak(W[c.w][0]); return; }
   if (!state.autoplay) return;
   if (c.type === "new") speak(W[c.w][0], txt);
   else if (sess.revealed) speak(txt);
@@ -505,8 +560,13 @@ function next() {
 function answer(ok) {
   const c = sess.queue[sess.i], L = state.learned[c.w], now = Date.now();
   state.lastSent[c.w] = sess.sent;
-  if (c.sched) { grade(c.w, ok, now); sess.stats.review++; }
-  if (ok && L && c.type !== "check") { const k = {read: "reads", listen: "hears", write: "writes", choose: "reads"}[c.mode || "read"]; L[k] = (L[k] || 0) + 1; }
+  if (c.sched) {
+    const st = state.stat = state.stat || {}, k = sess.dict ? "dict" : (c.mode || "read"), a = st[k] = st[k] || [0, 0];
+    a[1]++; if (ok) a[0]++;
+    if (L && L.s !== undefined) { const p = st.pred = st.pred || [0, 0, 0]; p[0] = +(p[0] + retr(Math.max(0, (now - L.last) / DAY), L.s)).toFixed(4); p[1]++; if (ok) p[2]++; }
+    grade(c.w, ok, now); sess.stats.review++;
+  }
+  if (ok && L && c.type !== "check") { const k = {read: "reads", listen: "hears", write: "writes", choose: "reads", tone: "tones", mean: "reads"}[c.mode || "read"]; L[k] = (L[k] || 0) + 1; }
   // si has entendido la frase, las demás palabras pendientes que contiene también quedan repasadas
   if (ok && c.sched) for (const cw of sess.co) {
     if (sess.coEx.has(cw) || !sess.pending.has(cw)) continue;
@@ -516,7 +576,7 @@ function answer(ok) {
   if (!ok) {
     sess.stats.fail++;
     const pos = Math.min(sess.queue.length, sess.i + 3 + Math.floor(Math.random() * 4));
-    sess.queue.splice(pos, 0, {type: c.sched || c.type === "relearn" ? "relearn" : c.type, w: c.w, mode: "read"});
+    sess.queue.splice(pos, 0, {type: c.sched || c.type === "relearn" ? "relearn" : c.type, w: c.w, mode: "mean"});
     sess.total++;
     // palabra rebelde: a partir del cuarto fallo, ficha de refuerzo
     if (c.sched && L && (L.lapses || 0) >= 4 && !sess.leeched.has(c.w)) {
@@ -574,7 +634,7 @@ const rdNew = () => RD.findIndex((r, i) => !rdDone(i) && rdMissing(i) === 0);
 let libre = {lines: [], n: 0};
 function nuevaTanda() {
   const seen = state.seenS || {};
-  const c = shuffle(S.map((s, i) => i).filter(si => S[si][0].every(x => typeof x !== "number" || isKnown(x))));
+  const c = shuffle(S.map((s, i) => i).filter(okSent));
   c.sort((a, b) => (seen[a] || 0) - (seen[b] || 0));
   const ids = c.slice(0, 8);
   ids.forEach(markSeen); save();
@@ -598,12 +658,14 @@ function renderHome() {
   const main = (nw || due)
     ? `<button class="big" id="go">Empezar</button>`
     : (known ? `<button class="big ghost" id="free">Reforzar las más flojas</button>` : "");
+  const dias = Math.floor((Date.now() - (state.lastExport || state.firstUse || Date.now())) / DAY);
+  const copia = !docRef && known >= 20 && dias >= 14 ? `<button class="warn wbtn" id="bkp">Hace ${dias} días que no guardas una copia de tu progreso, que solo vive en este dispositivo. Toca para exportarla.</button>` : "";
   const ri = rdNew();
   const lectura = ri >= 0 ? `<button class="card rdcard" id="rdnew"><small>Lectura nueva</small><b>${esc(RD[ri][0])}</b><span>${esc(RD[ri][1])} · solo con palabras que ya sabes</span></button>` : "";
   $app.innerHTML = `
     <div class="top"><div class="brand">学中文<small>3 palabras cada 12 h</small></div>
       <button class="iconbtn" id="set" aria-label="Ajustes">${ICON.gear}</button></div>
-    ${voiceWarn}
+    ${voiceWarn}${copia}
     <div class="stats">
       <div class="stat"><b>${known}</b><span>palabras</span></div>
       <div class="stat"><b>${state.streak || 0}</b><span>días seguidos</span></div>
@@ -616,6 +678,7 @@ function renderHome() {
   const on = (id, f) => { const e = document.getElementById(id); if (e) e.onclick = f; };
   on("go", () => { startSession(false); autoplayCard(); });
   on("free", () => { startSession(true); autoplayCard(); });
+  on("bkp", () => { view = "settings"; confirmReset = false; render(); });
   on("voc", () => { view = "vocab"; render(); });
   on("rds", () => { view = "readings"; render(); });
   on("rdnew", () => { rdOpen = ri; rdOpt = {py: false, tr: false}; view = "reading"; render(); });
@@ -666,25 +729,33 @@ function renderReading() {
 
 /* ---------- tarjetas ---------- */
 function dictHTML(typedRaw, txt) {
-  const typed = normZh(typedRaw), target = normZh(txt), exact = typed === target;
+  const typed = normZh(typedRaw), target = normZh(txt), eq = s => s.replace(/[她它]/g, "他"), exact = eq(typed) === eq(target);
   const {ina, inb} = diffZh(typed, target);
   const yours = [...typed].map((ch, k) => `<span class="${ina[k] ? "" : "bad"}">${esc(ch)}</span>`).join("");
   const right = [...target].map((ch, k) => `<span class="${inb[k] ? "" : "miss"}">${esc(ch)}</span>`).join("");
   return {exact, html: exact ? `<div class="wres okb">¡Dictado correcto!</div>`
     : `<div class="wres kob">Compara</div><div class="cmp"><small>Tu dictado</small><div class="zh">${yours}</div><small>Correcto</small><div class="zh">${right}</div></div>`};
 }
+function mcBlock(cls) {
+  return `<div class="mcs${cls ? " " + cls : ""}">${sess.opts.map((o, k) => `<button class="mc" data-o="${k}">${esc(o.t)}</button>`).join("")}</div>
+    <button class="skip" id="idk">No lo sé</button>`;
+}
 function renderSession() {
   const c = sess.queue[sess.i], w = W[c.w], si = sess.sent, L = state.learned[c.w] || {};
   const pct = Math.round(sess.i / sess.total * 100);
   const mode = c.type === "new" || c.type === "leech" ? c.type : (c.mode || "read");
   const pre = c.type === "relearn" ? "Otra vez" : c.type === "check" ? "Comprueba la nueva" : c.type === "free" ? "Refuerzo" : "Repaso";
-  const kind = c.type === "relearn" || c.type === "check" ? pre : `${pre} · ${{read: "leer", listen: "escuchar", write: "escribir", choose: "¿cuál es?"}[mode]}`;
+  const kind = c.type === "relearn" || c.type === "check" ? pre : `${pre} · ${{read: "leer", listen: "escuchar", write: "escribir", choose: "¿cuál es?", tone: "tonos", mean: "significado"}[mode]}`;
   const txt = sentText(S[si][0]);
   const gloss = `<div class="gloss"><b>${esc(w[0])}</b> ${esc(w[1])} · ${esc(w[2])}</div>${L.note ? `<div class="truco">Tu truco: ${esc(L.note)}</div>` : ""}`;
-  const co = c.sched && sess.co.length ? `<div class="co"><small>Esta frase repasa también estas palabras. Toca la que no supieras:</small><div>${sess.co.map(id =>
+  const okNow = mode === "write" ? undefined : sess.dict ? sess.dictOk : (sess.pick !== null && sess.pick >= 0 && sess.opts && sess.opts[sess.pick] && sess.opts[sess.pick].ok);
+  const co = c.sched && okNow !== false && sess.co.length ? `<div class="co"><small>Esta frase repasa también estas palabras. Toca la que no supieras:</small><div>${sess.co.map(id =>
     `<button class="chip${sess.coEx.has(id) ? " ex" : ""}" data-co="${id}">${esc(W[id][0])}</button>`).join("")}</div></div>` : "";
   const playBtn = `<div class="center"><button class="play" id="play">${ICON.sound} Escuchar</button></div>`;
-  const gradeBtns = `<div class="grade"><button class="again" id="no">Otra vez</button><button class="good" id="ok">Lo sabía</button></div>`;
+  const flagBtn = `<div class="center"><button class="flag" id="flag"${state.flag && state.flag[si] ? " disabled" : ""}>${state.flag && state.flag[si] ? "Frase marcada como dudosa" : "¿Frase rara? Márcala como dudosa"}</button></div>`;
+  const mcRes = () => sess.pick >= 0 && sess.opts[sess.pick].ok ? `<div class="wres okb">¡Correcto!</div>`
+    : `<div class="wres kob">${sess.pick >= 0 ? "No. Elegiste: " + esc(sess.opts[sess.pick].t) : "Solución"}</div>`;
+  const nextBtn = ok => `<button class="big" id="${ok ? "ok" : "no"}">Siguiente</button>`;
   let body;
   if (mode === "leech") {
     const chars = [...w[0]];
@@ -729,10 +800,10 @@ function renderSession() {
         <div class="card"><div class="es">${esc(S[si][1])}</div>
           <div class="wres ${exact ? "okb" : "kob"}">${exact ? "¡Correcto!" : sess.typed === "" ? "Solución" : "Compara"}</div>
           ${exact ? "" : `<div class="cmp"><small>Tu respuesta</small><div class="zh">${yours}</div><small>Correcta</small><div class="zh">${right}</div></div>`}
-          ${sentenceHTML(si, c.w, false)}${gloss}${sess.typed ? co : ""}${playBtn}</div>
+          ${sentenceHTML(si, c.w, false)}${gloss}${sess.typed ? co : ""}${playBtn}${flagBtn}</div>
         <div class="spacer"></div>
         ${exact ? `<button class="big" id="ok">Siguiente</button>`
-          : sess.typed ? `<div class="grade"><button class="again" id="no">Otra vez</button><button class="good" id="ok">También vale</button></div>`
+          : sess.typed ? `<div class="grade"><button class="again" id="no">Otra vez</button><button class="good" id="ok">Otra traducción válida</button></div>`
           : `<button class="big" id="no">Siguiente</button>`}`;
     } else {
       body = `<div class="kind">${kind}</div>
@@ -746,16 +817,15 @@ function renderSession() {
   } else if (mode === "listen") {
     body = sess.revealed
       ? `<div class="kind">${kind}</div>
-      <div class="card">${sess.typed ? dictHTML(sess.typed, txt).html : ""}${sentenceHTML(si, c.w, false)}<div class="tr">${esc(S[si][1])}</div>${gloss}${co}${playBtn}</div>
-      <div class="spacer"></div>${sess.typed && dictHTML(sess.typed, txt).exact ? `<button class="big" id="ok">Siguiente</button>` : gradeBtns}`
+      <div class="card">${sess.dict ? dictHTML(sess.typed, txt).html : mcRes()}${sentenceHTML(si, c.w, false)}<div class="tr">${esc(S[si][1])}</div>${gloss}${co}${playBtn}${flagBtn}</div>
+      <div class="spacer"></div>${nextBtn(okNow)}`
       : `<div class="kind">${kind}</div>
-      <div class="card lis"><div class="es muted">Escucha y entiende la frase</div>
-        <button class="bigplay" id="play" aria-label="Escuchar">${ICON.sound}</button>
+      <div class="card lis"><button class="bigplay" id="play" aria-label="Escuchar">${ICON.sound}</button>
         <div class="center"><button class="play" id="slow">Más lento</button></div>
-        <form id="wf" autocomplete="off"><input id="win" class="win" type="text" lang="zh-CN" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Escribe lo que oyes (opcional)"></form>
+        <form id="wf" autocomplete="off"><input id="win" class="win" type="text" lang="zh-CN" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Dictado: escribe lo que oyes"></form>
         <div class="warnp" id="wp"></div></div>
-      <div class="spacer"></div>
-      <button class="reveal" id="rev">¿La has entendido? Toca para ver la frase</button>`;
+      <div class="q">…o elige lo que significa:</div>
+      ${mcBlock()}`;
   } else if (mode === "choose") {
     const a = W[c.alt], opts = c.flip ? [c.alt, c.w] : [c.w, c.alt];
     if (sess.revealed) {
@@ -764,25 +834,44 @@ function renderSession() {
       <div class="card"><div class="wres ${ok ? "okb" : "kob"}">${ok ? "¡Correcto!" : "No: era " + esc(w[0])}</div>
         ${sentenceHTML(si, c.w, false)}<div class="tr">${esc(S[si][1])}</div>
         <div class="gloss"><b>${esc(w[0])}</b> ${esc(w[1])} · ${esc(w[2])}</div>
-        <div class="gloss"><b>${esc(a[0])}</b> ${esc(a[1])} · ${esc(a[2])}</div>${playBtn}</div>
+        <div class="gloss"><b>${esc(a[0])}</b> ${esc(a[1])} · ${esc(a[2])}</div>${playBtn}${flagBtn}</div>
       <div class="spacer"></div>
-      <button class="big" id="${ok ? "ok" : "no"}">Siguiente</button>`;
+      ${nextBtn(ok)}`;
     } else {
       body = `<div class="kind">${kind}</div>
       <div class="card">${sentenceHTML(si, c.w, !state.pinyinFirst, true)}<div class="tr">${esc(S[si][1])}</div></div>
       <div class="spacer"></div>
       <div class="grade">${opts.map(id => `<button class="optb" data-p="${id}">${esc(W[id][0])}</button>`).join("")}</div>`;
     }
+  } else if (mode === "tone") {
+    body = sess.revealed
+      ? `<div class="kind">${kind}</div>
+      <div class="card">${mcRes()}<div class="word nb0"><div class="h">${esc(w[0])}</div><div class="p">${esc(w[1])}</div><div class="m">${esc(w[2])}</div></div>
+        ${sentenceHTML(si, c.w, false, false, "sm ctr")}<div class="rtr" style="text-align:center">${esc(S[si][1])}</div>
+        <div class="center"><button class="play" id="playw">${ICON.sound} Escuchar</button></div></div>
+      <div class="spacer"></div>${nextBtn(okNow)}`
+      : `<div class="kind">${kind}</div>
+      <div class="card"><div class="word nb0"><div class="h">${esc(w[0])}</div><div class="m">${esc(w[2])}</div></div></div>
+      <div class="q">¿Cómo se pronuncia?</div>
+      ${mcBlock("py")}`;
+  } else if (mode === "mean") {
+    body = sess.revealed
+      ? `<div class="kind">${kind}</div>
+      <div class="card">${mcRes()}${sentenceHTML(si, c.w, false)}<div class="tr">${esc(S[si][1])}</div>${gloss}${playBtn}${flagBtn}</div>
+      <div class="spacer"></div>${nextBtn(okNow)}`
+      : `<div class="kind">${kind}</div>
+      <div class="card">${sentenceHTML(si, c.w, !state.pinyinFirst)}</div>
+      <div class="q">¿Qué significa la palabra marcada?</div>
+      ${mcBlock()}`;
   } else {
-    const showP = sess.revealed || state.pinyinFirst;
-    body = `<div class="kind">${kind}</div>
-      <div class="card">
-        ${sentenceHTML(si, c.w, !showP)}
-        ${sess.revealed ? `<div class="tr">${esc(S[si][1])}</div>${gloss}${co}` : ""}
-        ${playBtn}
-      </div>
-      <div class="spacer"></div>
-      ${sess.revealed ? gradeBtns : `<button class="reveal" id="rev">¿Entiendes la frase? Toca para ver la traducción</button>`}`;
+    body = sess.revealed
+      ? `<div class="kind">${kind}</div>
+      <div class="card">${mcRes()}${sentenceHTML(si, c.w, false)}<div class="tr">${esc(S[si][1])}</div>${gloss}${co}${playBtn}${flagBtn}</div>
+      <div class="spacer"></div>${nextBtn(okNow)}`
+      : `<div class="kind">${kind}</div>
+      <div class="card">${sentenceHTML(si, c.w, !state.pinyinFirst)}</div>
+      <div class="q">¿Qué significa la frase?</div>
+      ${mcBlock()}`;
   }
   $app.innerHTML = `
     <div class="top"><button class="iconbtn" id="x" aria-label="Salir">${ICON.close}</button>
@@ -793,12 +882,17 @@ function renderSession() {
   document.getElementById("x").onclick = () => { try { window.speechSynthesis && speechSynthesis.cancel(); } catch (e) {} view = "home"; sess = null; render(); };
   const on = (id, f) => { const e = document.getElementById(id); if (e) e.onclick = f; };
   on("play", () => speak(txt));
+  on("playw", () => speak(w[0]));
   on("slow", () => speakSlow(txt));
   on("next", next);
+  on("flag", () => { if (!state.flag) state.flag = {}; state.flag[si] = 1; save(); render(); });
   on("lnext", () => { const v = document.getElementById("note").value.trim(); if (v) L.note = v.slice(0, 120); else delete L.note; save(); next(); });
   $app.querySelectorAll("[data-ex]").forEach(el => el.onclick = () => speak(sentText(S[+el.dataset.ex][0])));
   $app.querySelectorAll("[data-co]").forEach(el => el.onclick = () => { const id = +el.dataset.co; if (sess.coEx.has(id)) sess.coEx.delete(id); else sess.coEx.add(id); render(); });
   $app.querySelectorAll("[data-p]").forEach(el => el.onclick = () => { sess.pick = +el.dataset.p; sess.revealed = true; render(); autoplayCard(); });
+  const pickOpt = k => { sess.pick = k; sess.revealed = true; render(); autoplayCard(); window.scrollTo(0, 0); };
+  $app.querySelectorAll("[data-o]").forEach(el => el.onclick = () => pickOpt(+el.dataset.o));
+  on("idk", () => pickOpt(-1));
   const wf = document.getElementById("wf");
   if (wf) {
     const inp = document.getElementById("win");
@@ -806,14 +900,16 @@ function renderSession() {
       const v = inp.value.trim();
       if (!v) { inp.focus(); return; }
       if (/[a-zA-Z]{2,}/.test(v) && !/[一-鿿]/.test(v)) { document.getElementById("wp").textContent = "Parece pinyin sin convertir: elige los caracteres en el teclado."; return; }
-      sess.typed = v; sess.revealed = true; render(); autoplayCard();
+      sess.typed = v;
+      if (mode === "listen") { sess.dict = true; sess.dictOk = dictHTML(v, txt).exact; }
+      sess.revealed = true; render(); autoplayCard(); window.scrollTo(0, 0);
     };
     wf.onsubmit = e => { e.preventDefault(); check(); };
     on("chk", check);
     on("giveup", () => { sess.typed = ""; sess.revealed = true; render(); autoplayCard(); });
     if (mode === "write") setTimeout(() => { try { inp.focus(); } catch (e) {} }, 50);
   }
-  on("rev", () => { const inp = document.getElementById("win"); if (mode === "listen" && inp && inp.value.trim() && /[\u4e00-\u9fff]/.test(inp.value)) sess.typed = inp.value.trim(); sess.revealed = true; render(); if (c.type === "new") { if (state.autoplay) speak(w[0]); } else autoplayCard(); });
+  on("rev", () => { sess.revealed = true; render(); if (c.type === "new") { if (state.autoplay) speak(w[0]); } else autoplayCard(); });
   on("ok", () => answer(true));
   on("no", () => answer(false));
 }
@@ -881,6 +977,15 @@ function renderVocab() {
   $app.querySelectorAll(".row").forEach(r => r.onclick = () => { const id = +r.dataset.w; speak(W[id][0]); openSheet(id); });
 }
 
+const flagged = () => Object.keys(state.flag || {}).map(Number);
+function statsText() {
+  const st = state.stat || {}, p = st.pred || [0, 0, 0];
+  if (p[1] < 30) return `Aún no hay datos suficientes: ${p[1]} de 30 repasos corregidos.`;
+  const pc = (a, b) => b ? Math.round(100 * a / b) + " %" : "–";
+  const nombres = {read: "leer", listen: "escuchar", dict: "dictado", write: "escribir", choose: "parecidas", tone: "tonos"};
+  const porTipo = Object.keys(nombres).filter(k => st[k] && st[k][1]).map(k => `${nombres[k]} ${pc(st[k][0], st[k][1])}`).join(" · ");
+  return `Aciertas el ${pc(p[2], p[1])} de los repasos (${p[1]}). El modelo preveía ${pc(p[0], p[1])} y tu objetivo es ${Math.round((state.ret || 0.9) * 100)} %. Por tipo: ${porTipo}. En las de elegir se puede acertar por azar, así que el dato real es algo menor.`;
+}
 function renderSettings() {
   const seg = [1, 2, 3].map(n => `<button data-n="${n}" class="${state.perDay === n ? "on" : ""}">${n * 3}</button>`).join("");
   const voice = !("speechSynthesis" in window) ? "No disponible en este navegador"
@@ -898,6 +1003,9 @@ function renderSettings() {
         <small>Probabilidad de recordar cada palabra cuando te toca repasarla. Más alta significa repasos más frecuentes.</small></div>
       <div class="opt"><label>Pausar palabras nuevas si hay más de…</label><div class="seg" id="cseg">${[[40, "40"], [60, "60"], [80, "80"], [0, "Sin tope"]].map(([v, l]) => `<button data-v="${v}" class="${capOf() === v ? "on" : ""}">${l}</button>`).join("")}</div>
         <small>Repasos pendientes al empezar la sesión. Si se supera, ese turno no trae palabras nuevas.</small></div>
+      <div class="opt"><label>Tu retención real</label><small style="margin:0">${statsText()}</small></div>
+      <div class="opt"><div class="switch">Tarjetas de tonos<button class="tg-sw ${state.tones !== false ? "on" : ""}" id="tn"></button></div>
+        <small>Ves la palabra y eliges su pinyin entre cuatro con los tonos cambiados.</small></div>
       <div class="opt"><div class="switch">Tarjetas de solo escucha<button class="tg-sw ${state.listen !== false ? "on" : ""}" id="li"></button></div>
         <small>Oyes la frase sin verla. Se activan en cada palabra cuando ya la has acertado leyendo.</small></div>
       <div class="opt"><label>Preguntas de escribir en chino</label><div class="seg" id="wseg">${[[0, "Ninguna"], [0.2, "Pocas"], [0.4, "Algunas"], [0.65, "Muchas"]].map(([v, l]) => `<button data-v="${v}" class="${(state.writeRate ?? 0.4) === v ? "on" : ""}">${l}</button>`).join("")}</div>
@@ -905,6 +1013,9 @@ function renderSettings() {
       <div class="opt"><div class="switch">Reproducir audio automáticamente<button class="tg-sw ${state.autoplay ? "on" : ""}" id="ap"></button></div></div>
       <div class="opt"><div class="switch">Pinyin visible antes de destapar<button class="tg-sw ${state.pinyinFirst ? "on" : ""}" id="pf"></button></div>
         <small>Desactivado obliga a leer los caracteres; el pinyin aparece al destapar la traducción.</small></div>
+      <div class="opt"><label>Frases marcadas como dudosas · ${flagged().length}</label>
+        <small style="margin:0">No vuelven a salir. Copia la lista y pásasela a Claude para corregirlas.</small>
+        ${flagged().length ? `<textarea id="fl" readonly></textarea><div class="row2"><button id="flc">Copiar lista</button><button id="flx">Vaciar</button></div>` : ""}</div>
       <div class="opt"><label>Copia de seguridad</label>
         <small style="margin:0">Guarda este código (por ejemplo en Notas) para recuperar tu progreso o pasarlo a otro dispositivo.</small>
         <div class="row2"><button id="exp">Exportar</button><button id="imp">Importar</button></div>
@@ -916,6 +1027,7 @@ function renderSettings() {
   document.querySelectorAll("#seg button").forEach(b => b.onclick = () => { state.perDay = +b.dataset.n; save(); render(); });
   document.querySelectorAll("#rseg button").forEach(b => b.onclick = () => { state.ret = +b.dataset.v; save(); render(); });
   document.querySelectorAll("#cseg button").forEach(b => b.onclick = () => { state.cap = +b.dataset.v; save(); render(); });
+  document.getElementById("tn").onclick = () => { state.tones = state.tones === false; save(); render(); };
   document.getElementById("li").onclick = () => { state.listen = state.listen === false; save(); render(); };
   document.querySelectorAll("#wseg button").forEach(b => b.onclick = () => { state.writeRate = +b.dataset.v; save(); render(); });
   const r = document.getElementById("rate");
@@ -924,7 +1036,14 @@ function renderSettings() {
   document.getElementById("test").onclick = () => speak("你好，我是西班牙人。");
   document.getElementById("ap").onclick = () => { state.autoplay = !state.autoplay; save(); render(); };
   document.getElementById("pf").onclick = () => { state.pinyinFirst = !state.pinyinFirst; save(); render(); };
+  const fl = document.getElementById("fl");
+  if (fl) {
+    fl.value = flagged().map(si => sentText(S[si][0]) + " | " + S[si][1]).join("\n");
+    document.getElementById("flc").onclick = async () => { try { await navigator.clipboard.writeText(fl.value); } catch (e) { fl.focus(); fl.select(); } };
+    document.getElementById("flx").onclick = () => { state.flag = {}; save(); render(); };
+  }
   document.getElementById("exp").onclick = () => {
+    state.lastExport = Date.now(); save();
     const copia = JSON.parse(JSON.stringify(state)); delete copia.seenS; delete copia.lastSent;
     const code = "ZH1:" + btoa(unescape(encodeURIComponent(JSON.stringify(copia))));
     const bk = document.getElementById("bk");
@@ -952,7 +1071,7 @@ function renderSettings() {
   };
   document.getElementById("reset").onclick = () => {
     if (!confirmReset) { confirmReset = true; render(); return; }
-    const keep = {ret: state.ret, cap: state.cap, listen: state.listen, perDay: state.perDay, writeRate: state.writeRate, rate: state.rate, autoplay: state.autoplay, pinyinFirst: state.pinyinFirst};
+    const keep = {tones: state.tones, ret: state.ret, cap: state.cap, listen: state.listen, perDay: state.perDay, writeRate: state.writeRate, rate: state.rate, autoplay: state.autoplay, pinyinFirst: state.pinyinFirst};
     state = Object.assign(defaults(), keep); confirmReset = false; save(); view = "home"; render();
   };
 }
